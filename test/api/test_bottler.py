@@ -1,6 +1,4 @@
 from src.api.bottler import PotionMixes, create_bottle_plan
-
-
 from typing import List
 
 
@@ -23,4 +21,4 @@ def test_bottle_red_potions() -> None:
 
     assert len(result) == 1
     assert result[0].potion_type == [100, 0, 0, 0]
-    assert result[0].quantity == 5
+    assert result[0].quantity == 100

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, field_validator
 from typing import List
+import random
 
 import sqlalchemy
 from src.api import auth
@@ -44,11 +45,34 @@ class BarrelOrder(BaseModel):
 @dataclass
 class BarrelSummary:
     gold_paid: int
+    red_ml: int
+    green_ml: int
+    blue_ml: int    
 
-
+#def calculate_barrel_summary(barrels: List[Barrel]) -> BarrelSummary:
+    #return BarrelSummary(gold_paid=sum(b.price * b.quantity for b in barrels))
 def calculate_barrel_summary(barrels: List[Barrel]) -> BarrelSummary:
-    return BarrelSummary(gold_paid=sum(b.price * b.quantity for b in barrels))
+    gold_paid = 0
+    red_ml = 0
+    green_ml = 0
+    blue_ml = 0
 
+    for barrel in barrels:
+        gold_paid += barrel.price * barrel.quantity
+
+        if barrel.potion_type == [1.0, 0.0, 0.0, 0.0]:
+            red_ml += barrel.ml_per_barrel * barrel.quantity
+        elif barrel.potion_type == [0.0, 1.0, 0.0, 0.0]:
+            green_ml += barrel.ml_per_barrel * barrel.quantity
+        elif barrel.potion_type == [0.0, 0.0, 1.0, 0.0]:
+            blue_ml += barrel.ml_per_barrel * barrel.quantity
+
+    return BarrelSummary(
+        gold_paid=gold_paid,
+        red_ml=red_ml,
+        green_ml=green_ml,
+        blue_ml=blue_ml,
+    )
 
 @router.post("/deliver/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
 def post_deliver_barrels(barrels_delivered: List[Barrel], order_id: int):
@@ -65,13 +89,19 @@ def post_deliver_barrels(barrels_delivered: List[Barrel], order_id: int):
             sqlalchemy.text(
                 """
                 UPDATE global_inventory SET 
-                gold = gold - :gold_paid
+                gold = gold - :gold_paid,
+                red_ml = red_ml + :red_ml,
+                green_ml = green_ml + :green_ml,
+                blue_ml = blue_ml + :blue_ml
                 """
             ),
-            [{"gold_paid": delivery.gold_paid}],
+            [{
+                "gold_paid": delivery.gold_paid,
+                "red_ml": delivery.red_ml,
+                "green_ml": delivery.green_ml,
+                "blue_ml": delivery.blue_ml,
+            }],
         )
-
-    pass
 
 
 def create_barrel_plan(
@@ -82,24 +112,41 @@ def create_barrel_plan(
     current_blue_ml: int,
     current_dark_ml: int,
     wholesale_catalog: List[Barrel],
+    red_potions: int,
+    green_potions: int,
+    blue_potions: int,
 ) -> List[BarrelOrder]:
-    print(
-        f"gold: {gold}, max_barrel_capacity: {max_barrel_capacity}, current_red_ml: {current_red_ml}, current_green_ml: {current_green_ml}, current_blue_ml: {current_blue_ml}, current_dark_ml: {current_dark_ml}, wholesale_catalog: {wholesale_catalog}"
-    )
+    color = random.choice(["red", "green", "blue"])
 
-    # find cheapest red barrel
-    red_barrel = min(
-        (barrel for barrel in wholesale_catalog if barrel.potion_type[0] == 1),
-        key=lambda b: b.price,
-        default=None,
-    )
+    if color == "red":
+        if red_potions >= 5:
+            return []
+        matching_barrels = [
+            barrel for barrel in wholesale_catalog
+            if barrel.potion_type == [1.0, 0.0, 0.0, 0.0]
+        ]
+    elif color == "green":
+        if green_potions >= 5:
+            return []
+        matching_barrels = [
+            barrel for barrel in wholesale_catalog
+            if barrel.potion_type == [0.0, 1.0, 0.0, 0.0]
+        ]
+    else:
+        if blue_potions >= 5:
+            return []
+        matching_barrels = [
+            barrel for barrel in wholesale_catalog
+            if barrel.potion_type == [0.0, 0.0, 1.0, 0.0]
+        ]
 
-    # make sure we can afford it
-    if red_barrel and red_barrel.price <= gold:
-        return [BarrelOrder(sku=red_barrel.sku, quantity=1)]
+    affordable_barrels = [barrel for barrel in matching_barrels if barrel.price <= gold]
 
-    # return an empty list if no affordable red barrel is found
-    return []
+    if not affordable_barrels:
+        return []
+
+    small_barrel = min(affordable_barrels, key=lambda b: b.ml_per_barrel)
+    return [BarrelOrder(sku=small_barrel.sku, quantity=1)]
 
 
 @router.post("/plan", response_model=List[BarrelOrder])
@@ -114,7 +161,7 @@ def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
         row = connection.execute(
             sqlalchemy.text(
                 """
-                SELECT gold
+                SELECT gold, red_ml, green_ml, blue_ml, red_potions, green_potions, blue_potions
                 FROM global_inventory
                 """
             )
@@ -124,11 +171,14 @@ def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
 
     # TODO: fill in values correctly based on what is in your database
     return create_barrel_plan(
-        gold=gold,
+        gold=row.gold,
         max_barrel_capacity=10000,
-        current_red_ml=0,
-        current_green_ml=0,
-        current_blue_ml=0,
+        current_red_ml=row.red_ml,
+        current_green_ml=row.green_ml,
+        current_blue_ml=row.blue_ml,
         current_dark_ml=0,
         wholesale_catalog=wholesale_catalog,
+        red_potions=row.red_potions,
+        green_potions=row.green_potions,
+        blue_potions=row.blue_potions,
     )

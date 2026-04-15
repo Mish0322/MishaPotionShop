@@ -44,27 +44,46 @@ def post_deliver_bottles(potions_delivered: List[PotionMixes], order_id: int):
     # TODO: Subtract ml based on how much delivered potions used.
     with db.engine.begin() as connection:
         for potion in potions_delivered:
+            red_used = potion.quantity * potion.potion_type[0] // 100
+            green_used = potion.quantity * potion.potion_type[1] // 100
+            blue_used = potion.quantity * potion.potion_type[2] // 100
+            dark_used = potion.quantity * potion.potion_type[3] // 100
 
-            if potion.potion_type == [100, 0, 0, 0]:
-                connection.execute(sqlalchemy.text("""
+            connection.execute(
+                sqlalchemy.text(
+                    """
                     UPDATE global_inventory
-                    SET red_ml = red_ml - :qty,
-                        red_potions = red_potions + :qty
-                """), {"qty": potion.quantity})
+                    SET red_ml = red_ml - :red_used,
+                        green_ml = green_ml - :green_used,
+                        blue_ml = blue_ml - :blue_used
+                    """
+                ),
+                {
+                    "red_used": red_used,
+                    "green_used": green_used,
+                    "blue_used": blue_used,
+                },
+            )
 
-            elif potion.potion_type == [0, 100, 0, 0]:
-                connection.execute(sqlalchemy.text("""
-                    UPDATE global_inventory
-                    SET green_ml = green_ml - :qty,
-                        green_potions = green_potions + :qty
-                """), {"qty": potion.quantity})
-
-            elif potion.potion_type == [0, 0, 100, 0]:
-                connection.execute(sqlalchemy.text("""
-                    UPDATE global_inventory
-                    SET blue_ml = blue_ml - :qty,
-                        blue_potions = blue_potions + :qty
-                """), {"qty": potion.quantity})
+            connection.execute(
+                sqlalchemy.text(
+                    """
+                    UPDATE potions
+                    SET inventory = inventory + :quantity
+                    WHERE red = :red
+                      AND green = :green
+                      AND blue = :blue
+                      AND dark = :dark
+                    """
+                ),
+                {
+                    "quantity": potion.quantity,
+                    "red": potion.potion_type[0],
+                    "green": potion.potion_type[1],
+                    "blue": potion.potion_type[2],
+                    "dark": potion.potion_type[3],
+                },
+            )
 
 
 def create_bottle_plan(
@@ -76,22 +95,48 @@ def create_bottle_plan(
     current_potion_inventory: List[PotionMixes],
 ) -> List[PotionMixes]:
     # TODO: Create a real bottle plan logic
-    #return [
-    #    PotionMixes(
-    #        potion_type=[100, 0, 0, 0],
-    #        quantity=5,
-    #    )
-    #]
     plan = []
 
-    if red_ml > 0:
-        plan.append(PotionMixes(potion_type=[100, 0, 0, 0], quantity=red_ml))
+    with db.engine.begin() as connection:
+        potions = connection.execute(
+            sqlalchemy.text(
+                """
+                SELECT red, green, blue, dark
+                FROM potions
+                """
+            )
+        ).mappings().all()
 
-    if green_ml > 0:
-        plan.append(PotionMixes(potion_type=[0, 100, 0, 0], quantity=green_ml))
+    for potion in potions:
+        red = potion["red"]
+        green = potion["green"]
+        blue = potion["blue"]
+        dark = potion["dark"]
 
-    if blue_ml > 0:
-        plan.append(PotionMixes(potion_type=[0, 0, 100, 0], quantity=blue_ml))
+        if dark != 0:
+            continue
+
+        possible_quantities = []
+
+        if red > 0:
+            possible_quantities.append(red_ml // red)
+        if green > 0:
+            possible_quantities.append(green_ml // green)
+        if blue > 0:
+            possible_quantities.append(blue_ml // blue)
+
+        if not possible_quantities:
+            continue
+
+        quantity = min(possible_quantities)
+
+        if quantity > 0:
+            plan.append(
+                PotionMixes(
+                    potion_type=[red, green, blue, dark],
+                    quantity=quantity,
+                )
+            )
 
     return plan
 

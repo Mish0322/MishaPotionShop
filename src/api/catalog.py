@@ -38,9 +38,22 @@ def create_catalog() -> List[CatalogItem]:
         rows = connection.execute(
             sqlalchemy.text(
                 """
-                SELECT sku, name, price, red, green, blue, dark, inventory
-                FROM potions
-                WHERE inventory > 0
+                SELECT
+                    p.id,
+                    p.sku,
+                    p.name,
+                    p.price,
+                    p.red,
+                    p.green,
+                    p.blue,
+                    p.dark,
+                    COALESCE(SUM(l.change), 0) AS quantity
+                FROM potions p
+                LEFT JOIN inventory_ledger_entries l
+                    ON l.resource_type = 'potion'
+                    AND l.resource_id = p.id
+                GROUP BY p.id, p.sku, p.name, p.price, p.red, p.green, p.blue, p.dark
+                HAVING COALESCE(SUM(l.change), 0) > 0
                 """
             )
         ).mappings().all()
@@ -52,7 +65,7 @@ def create_catalog() -> List[CatalogItem]:
             CatalogItem(
                 sku=row["sku"],
                 name=row["name"],
-                quantity=row["inventory"],
+                quantity=row["quantity"],
                 price=row["price"],
                 potion_type=[row["red"], row["green"], row["blue"], row["dark"]],
             )

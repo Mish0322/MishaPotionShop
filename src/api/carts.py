@@ -5,6 +5,7 @@ from src.api import auth
 from enum import Enum
 from typing import List, Optional
 from src import database as db
+import json
 
 router = APIRouter(
     prefix="/carts",
@@ -206,16 +207,40 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
     Handles the checkout process for a specific cart.
     """
 
+    request_key = f"cart_checkout_{cart_id}"
+
     with db.engine.begin() as connection:
+        existing_request = connection.execute(
+            sqlalchemy.text(
+                """
+                SELECT response
+                FROM processed_requests
+                WHERE request_key = :request_key
+                """
+            ),
+            {"request_key": request_key},
+        ).first()
+
+        if existing_request is not None:
+            response = existing_request.response
+            if isinstance(response, str):
+                response = json.loads(response)
+
+            return CheckoutResponse(
+                total_potions_bought=response["total_potions_bought"],
+                total_gold_paid=response["total_gold_paid"],
+            )
+
         cart = connection.execute(
             sqlalchemy.text(
                 """
-                SELECT id FROM carts
+                SELECT id, customer_id, customer_name, character_class, character_species, level
+                FROM carts
                 WHERE id = :cart_id
                 """
             ),
             {"cart_id": cart_id},
-        ).first()
+        ).mappings().first()
 
         if cart is None:
             raise HTTPException(status_code=404, detail="Cart not found")
@@ -223,7 +248,7 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
         items = connection.execute(
             sqlalchemy.text(
                 """
-                SELECT ci.id, ci.quantity, p.id AS potion_id, p.price, p.inventory
+                SELECT ci.quantity, p.id AS potion_id, p.price
                 FROM cart_items ci
                 JOIN potions p ON ci.potion_id = p.id
                 WHERE ci.cart_id = :cart_id
@@ -235,6 +260,17 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
         total_potions_bought = 0
         total_gold_paid = 0
 
+        transaction = connection.execute(
+            sqlalchemy.text(
+                """
+                INSERT INTO inventory_transactions (order_id, transaction_type, description)
+                VALUES (:order_id, 'cart_checkout', 'Customer checked out cart')
+                RETURNING id
+                """
+            ),
+            {"order_id": str(cart_id)},
+        ).one()
+
         for item in items:
             total_potions_bought += item["quantity"]
             total_gold_paid += item["quantity"] * item["price"]
@@ -242,35 +278,66 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
             connection.execute(
                 sqlalchemy.text(
                     """
-                    UPDATE potions
-                    SET inventory = inventory - :quantity
-                    WHERE id = :potion_id
+                    INSERT INTO inventory_ledger_entries
+                    (transaction_id, resource_type, resource_id, change)
+                    VALUES (:transaction_id, 'potion', :potion_id, :change)
                     """
                 ),
                 {
-                    "quantity": item["quantity"],
+                    "transaction_id": transaction.id,
                     "potion_id": item["potion_id"],
+                    "change": -item["quantity"],
                 },
             )
-
-        row = connection.execute(
-            sqlalchemy.text(
-                """
-                SELECT gold FROM global_inventory
-                """
-            )
-        ).one()
-
-        new_gold = row.gold + total_gold_paid
 
         connection.execute(
             sqlalchemy.text(
                 """
-                UPDATE global_inventory
-                SET gold = :gold
+                INSERT INTO inventory_ledger_entries
+                (transaction_id, resource_type, resource_id, change)
+                VALUES (:transaction_id, 'gold', NULL, :change)
                 """
             ),
-            {"gold": new_gold},
+            {
+                "transaction_id": transaction.id,
+                "change": total_gold_paid,
+            },
+        )
+
+        connection.execute(
+            sqlalchemy.text(
+                """
+                INSERT INTO sales
+                (cart_id, customer_id, customer_name, character_class, character_species, level, day, hour)
+                VALUES (:cart_id, :customer_id, :customer_name, :character_class, :character_species, :level, 'unknown', 0)
+                """
+            ),
+            {
+                "cart_id": cart_id,
+                "customer_id": cart["customer_id"],
+                "customer_name": cart["customer_name"],
+                "character_class": cart["character_class"],
+                "character_species": cart["character_species"],
+                "level": cart["level"],
+            },
+        )
+
+        response_data = {
+            "total_potions_bought": total_potions_bought,
+            "total_gold_paid": total_gold_paid,
+        }
+
+        connection.execute(
+            sqlalchemy.text(
+                """
+                INSERT INTO processed_requests (request_key, endpoint, response)
+                VALUES (:request_key, 'carts/checkout', CAST(:response AS JSON))
+                """
+            ),
+            {
+                "request_key": request_key,
+                "response": json.dumps(response_data),
+            },
         )
 
     return CheckoutResponse(

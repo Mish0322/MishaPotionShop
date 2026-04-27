@@ -83,24 +83,81 @@ def post_deliver_barrels(barrels_delivered: List[Barrel], order_id: int):
     print(f"barrels delivered: {barrels_delivered} order_id: {order_id}")
 
     delivery = calculate_barrel_summary(barrels_delivered)
+    request_key = f"barrels_deliver_{order_id}"
 
     with db.engine.begin() as connection:
+        existing_request = connection.execute(
+            sqlalchemy.text(
+                """
+                SELECT request_key
+                FROM processed_requests
+                WHERE request_key = :request_key
+                """
+            ),
+            {"request_key": request_key},
+        ).first()
+
+        if existing_request is not None:
+            return
+
+        transaction = connection.execute(
+            sqlalchemy.text(
+                """
+                INSERT INTO inventory_transactions (order_id, transaction_type, description)
+                VALUES (:order_id, 'barrel_delivery', 'Delivered barrels')
+                RETURNING id
+                """
+            ),
+            {"order_id": str(order_id)},
+        ).one()
+
+        transaction_id = transaction.id
+
+        ledger_entries = [
+            {
+                "transaction_id": transaction_id,
+                "resource_type": "gold",
+                "resource_id": None,
+                "change": -delivery.gold_paid,
+            },
+            {
+                "transaction_id": transaction_id,
+                "resource_type": "red_ml",
+                "resource_id": None,
+                "change": delivery.red_ml,
+            },
+            {
+                "transaction_id": transaction_id,
+                "resource_type": "green_ml",
+                "resource_id": None,
+                "change": delivery.green_ml,
+            },
+            {
+                "transaction_id": transaction_id,
+                "resource_type": "blue_ml",
+                "resource_id": None,
+                "change": delivery.blue_ml,
+            },
+        ]
+
         connection.execute(
             sqlalchemy.text(
                 """
-                UPDATE global_inventory SET 
-                gold = gold - :gold_paid,
-                red_ml = red_ml + :red_ml,
-                green_ml = green_ml + :green_ml,
-                blue_ml = blue_ml + :blue_ml
+                INSERT INTO inventory_ledger_entries (transaction_id, resource_type, resource_id, change)
+                VALUES (:transaction_id, :resource_type, :resource_id, :change)
                 """
             ),
-            [{
-                "gold_paid": delivery.gold_paid,
-                "red_ml": delivery.red_ml,
-                "green_ml": delivery.green_ml,
-                "blue_ml": delivery.blue_ml,
-            }],
+            ledger_entries,
+        )
+
+        connection.execute(
+            sqlalchemy.text(
+                """
+                INSERT INTO processed_requests (request_key, endpoint, response)
+                VALUES (:request_key, 'barrels/deliver', '{}'::json)
+                """
+            ),
+            {"request_key": request_key},
         )
 
 

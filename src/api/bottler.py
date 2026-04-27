@@ -40,50 +40,87 @@ def post_deliver_bottles(potions_delivered: List[PotionMixes], order_id: int):
     """
     print(f"potions delivered: {potions_delivered} order_id: {order_id}")
 
-    # TODO: Record values of delivered potions in your database.
-    # TODO: Subtract ml based on how much delivered potions used.
+    request_key = f"bottler_deliver_{order_id}"
+
     with db.engine.begin() as connection:
+        already_done = connection.execute(
+            sqlalchemy.text(
+                """
+                SELECT request_key FROM processed_requests
+                WHERE request_key = :request_key
+                """
+            ),
+            {"request_key": request_key},
+        ).first()
+
+        if already_done:
+            return
+
+        transaction = connection.execute(
+            sqlalchemy.text(
+                """
+                INSERT INTO inventory_transactions (order_id, transaction_type, description)
+                VALUES (:order_id, 'bottler_delivery', 'Delivered bottled potions')
+                RETURNING id
+                """
+            ),
+            {"order_id": str(order_id)},
+        ).one()
+
         for potion in potions_delivered:
             red_used = potion.quantity * potion.potion_type[0] // 100
             green_used = potion.quantity * potion.potion_type[1] // 100
             blue_used = potion.quantity * potion.potion_type[2] // 100
-            dark_used = potion.quantity * potion.potion_type[3] // 100
 
-            connection.execute(
+            potion_row = connection.execute(
                 sqlalchemy.text(
                     """
-                    UPDATE global_inventory
-                    SET red_ml = red_ml - :red_used,
-                        green_ml = green_ml - :green_used,
-                        blue_ml = blue_ml - :blue_used
+                    SELECT id FROM potions
+                    WHERE red = :red AND green = :green AND blue = :blue AND dark = :dark
                     """
                 ),
                 {
-                    "red_used": red_used,
-                    "green_used": green_used,
-                    "blue_used": blue_used,
-                },
-            )
-
-            connection.execute(
-                sqlalchemy.text(
-                    """
-                    UPDATE potions
-                    SET inventory = inventory + :quantity
-                    WHERE red = :red
-                      AND green = :green
-                      AND blue = :blue
-                      AND dark = :dark
-                    """
-                ),
-                {
-                    "quantity": potion.quantity,
                     "red": potion.potion_type[0],
                     "green": potion.potion_type[1],
                     "blue": potion.potion_type[2],
                     "dark": potion.potion_type[3],
                 },
+            ).first()
+
+            if potion_row is None:
+                continue
+
+            connection.execute(
+                sqlalchemy.text(
+                    """
+                    INSERT INTO inventory_ledger_entries
+                    (transaction_id, resource_type, resource_id, change)
+                    VALUES
+                    (:transaction_id, 'red_ml', NULL, :red_change),
+                    (:transaction_id, 'green_ml', NULL, :green_change),
+                    (:transaction_id, 'blue_ml', NULL, :blue_change),
+                    (:transaction_id, 'potion', :potion_id, :potion_change)
+                    """
+                ),
+                {
+                    "transaction_id": transaction.id,
+                    "red_change": -red_used,
+                    "green_change": -green_used,
+                    "blue_change": -blue_used,
+                    "potion_id": potion_row.id,
+                    "potion_change": potion.quantity,
+                },
             )
+
+        connection.execute(
+            sqlalchemy.text(
+                """
+                INSERT INTO processed_requests (request_key, endpoint, response)
+                VALUES (:request_key, 'bottler/deliver', '{}'::json)
+                """
+            ),
+            {"request_key": request_key},
+        )
 
 
 def create_bottle_plan(
@@ -150,10 +187,17 @@ def get_bottle_plan():
     """
     with db.engine.begin() as connection:
         result = connection.execute(
-            sqlalchemy.text("SELECT * FROM global_inventory")
+            sqlalchemy.text(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN resource_type = 'red_ml' THEN change ELSE 0 END), 0) AS red_ml,
+                    COALESCE(SUM(CASE WHEN resource_type = 'green_ml' THEN change ELSE 0 END), 0) AS green_ml,
+                    COALESCE(SUM(CASE WHEN resource_type = 'blue_ml' THEN change ELSE 0 END), 0) AS blue_ml
+                FROM inventory_ledger_entries
+                """
+            )
         ).mappings().first()
 
-    # TODO: Fill in values below based on what is in your database
     return create_bottle_plan(
         red_ml=result["red_ml"],
         green_ml=result["green_ml"],
